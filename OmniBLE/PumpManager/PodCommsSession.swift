@@ -842,7 +842,7 @@ public class PodCommsSession {
 
     public func recoverUnacknowledgedCommand(using status: StatusResponse) {
         if let pendingCommand = podState.unacknowledgedCommand {
-            self.log.debug("Recovering from unacknowledged command %{public}@, status = %{public}@", String(describing: pendingCommand), String(describing: status))
+            self.log.default("Recovering from unacknowledged command %{public}@, status = %{public}@", String(describing: pendingCommand), String(describing: status))
 
             if status.lastProgrammingMessageSeqNum == pendingCommand.sequence {
                 self.log.debug("Unacknowledged command was received by pump")
