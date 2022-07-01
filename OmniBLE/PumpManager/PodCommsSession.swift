@@ -479,7 +479,7 @@ public class PodCommsSession {
     
     public func bolus(units: Double, automatic: Bool = false, acknowledgementBeep: Bool = false, completionBeep: Bool = false, programReminderInterval: TimeInterval = 0) -> DeliveryCommandResult {
 
-        guard podState.pendingCommand == nil else {
+        guard podState.unacknowledgedCommand == nil else {
             return DeliveryCommandResult.certainFailure(error: .unacknowledgedCommandPending)
         }
 
@@ -498,26 +498,26 @@ public class PodCommsSession {
             }
         }
 
-        let startTime = Date()
-        
         let bolusExtraCommand = BolusExtraCommand(units: units, timeBetweenPulses: timeBetweenPulses, acknowledgementBeep: acknowledgementBeep, completionBeep: completionBeep, programReminderInterval: programReminderInterval)
         do {
+            podState.unacknowledgedCommand = PendingCommand.program(.bolus(volume: units, automatic: automatic), transport.messageNumber, Date())
             let statusResponse: StatusResponse = try send([bolusScheduleCommand, bolusExtraCommand])
-            podState.unfinalizedBolus = UnfinalizedDose(bolusAmount: units, startTime: startTime, scheduledCertainty: .certain, insulinType: podState.insulinType, automatic: automatic)
+            podState.unfinalizedBolus = UnfinalizedDose(bolusAmount: units, startTime: Date(), scheduledCertainty: .certain, insulinType: podState.insulinType, automatic: automatic)
             podState.updateFromStatusResponse(statusResponse)
             return DeliveryCommandResult.success(statusResponse: statusResponse)
         } catch PodCommsError.unacknowledgedMessage(let seq, let error) {
-            podState.pendingCommand = PendingCommand.program(.bolus(volume: units, automatic: automatic), seq, startTime)
+            podState.unacknowledgedCommand = podState.unacknowledgedCommand?.commsFinished
             log.error("Unacknowledged bolus: command seq = %d, error = %{public}@", seq, String(describing: error))
             return DeliveryCommandResult.unacknowledged(error: .commsError(error: error))
         } catch let error {
+            podState.unacknowledgedCommand = nil
             return DeliveryCommandResult.certainFailure(error: .commsError(error: error))
         }
     }
     
     public func setTempBasal(rate: Double, duration: TimeInterval, isHighTemp: Bool, automatic: Bool, acknowledgementBeep: Bool = false, completionBeep: Bool = false, programReminderInterval: TimeInterval = 0) -> DeliveryCommandResult {
 
-        guard podState.pendingCommand == nil else {
+        guard podState.unacknowledgedCommand == nil else {
             return DeliveryCommandResult.certainFailure(error: .unacknowledgedCommandPending)
         }
 
@@ -531,15 +531,17 @@ public class PodCommsSession {
         let startTime = Date()
 
         do {
+            podState.unacknowledgedCommand = PendingCommand.program(.tempBasal(unitsPerHour: rate, duration: duration, isHighTemp: isHighTemp, automatic: automatic), transport.messageNumber, startTime)
             let status: StatusResponse = try send([tempBasalCommand, tempBasalExtraCommand])
             podState.unfinalizedTempBasal = UnfinalizedDose(tempBasalRate: rate, startTime: startTime, duration: duration, isHighTemp: isHighTemp, automatic: automatic, scheduledCertainty: .certain, insulinType: podState.insulinType)
             podState.updateFromStatusResponse(status)
             return DeliveryCommandResult.success(statusResponse: status)
         } catch PodCommsError.unacknowledgedMessage(let seq, let error) {
-            podState.pendingCommand = PendingCommand.program(.tempBasal(unitsPerHour: rate, duration: duration, isHighTemp: isHighTemp, automatic: automatic), seq, startTime)
+            podState.unacknowledgedCommand = podState.unacknowledgedCommand?.commsFinished
             log.error("Unacknowledged temp basal: command seq = %d, error = %{public}@", seq, String(describing: error))
             return DeliveryCommandResult.unacknowledged(error: .commsError(error: error))
         } catch let error {
+            podState.unacknowledgedCommand = nil
             return DeliveryCommandResult.certainFailure(error: .commsError(error: error))
         }
     }
@@ -587,7 +589,7 @@ public class PodCommsSession {
     // A suspendReminder of > 5 min will have periodic podSuspendedReminder beeps followed by suspendTimeExpired alerts.
     public func suspendDelivery(suspendReminder: TimeInterval? = nil, beepBlock: MessageBlock? = nil) -> CancelDeliveryResult {
 
-        guard podState.pendingCommand == nil else {
+        guard podState.unacknowledgedCommand == nil else {
             return .certainFailure(error: .unacknowledgedCommandPending)
         }
 
@@ -620,6 +622,8 @@ public class PodCommsSession {
                 commandsToSend += [configureAlerts]
             }
 
+            podState.unacknowledgedCommand = PendingCommand.stopProgram(.all, transport.messageNumber, Date())
+
             let status: StatusResponse = try send(commandsToSend, beepBlock: beepBlock)
             let canceledDose = handleCancelDosing(deliveryType: .all, bolusNotDelivered: status.bolusNotDelivered)
             podState.updateFromStatusResponse(status)
@@ -634,10 +638,11 @@ public class PodCommsSession {
             return CancelDeliveryResult.success(statusResponse: status, canceledDose: canceledDose)
 
         } catch PodCommsError.unacknowledgedMessage(let seq, let error) {
-            podState.pendingCommand = PendingCommand.stopProgram(.all, seq, Date())
+            podState.unacknowledgedCommand = podState.unacknowledgedCommand?.commsFinished
             log.error("Unacknowledged suspend: command seq = %d, error = %{public}@", seq, String(describing: error))
             return .unacknowledged(error: .commsError(error: error))
         } catch let error {
+            podState.unacknowledgedCommand = nil
             return .certainFailure(error: .commsError(error: error))
         }
     }
@@ -661,11 +666,12 @@ public class PodCommsSession {
     // N.B., Using the built-in cancel delivery command beepType method when cancelling all insulin delivery will emit 3 different sets of cancel beeps!!!
     public func cancelDelivery(deliveryType: CancelDeliveryCommand.DeliveryType, beepType: BeepType = .noBeep, beepBlock: MessageBlock? = nil) -> CancelDeliveryResult {
 
-        guard podState.pendingCommand == nil else {
+        guard podState.unacknowledgedCommand == nil else {
             return .certainFailure(error: .unacknowledgedCommandPending)
         }
 
         do {
+            podState.unacknowledgedCommand = PendingCommand.stopProgram(deliveryType, transport.messageNumber, Date())
             let cancelDeliveryCommand = CancelDeliveryCommand(nonce: podState.currentNonce, deliveryType: deliveryType, beepType: beepType)
             let status: StatusResponse = try send([cancelDeliveryCommand], beepBlock: beepBlock)
 
@@ -674,16 +680,17 @@ public class PodCommsSession {
 
             return CancelDeliveryResult.success(statusResponse: status, canceledDose: canceledDose)
         } catch PodCommsError.unacknowledgedMessage(let seq, let error) {
-            podState.pendingCommand = PendingCommand.stopProgram(deliveryType, seq, Date())
+            podState.unacknowledgedCommand = podState.unacknowledgedCommand?.commsFinished
             log.debug("Unacknowledged stop program: command seq = %d", seq)
             return .unacknowledged(error: .commsError(error: error))
         } catch let error {
+            podState.unacknowledgedCommand = nil
             return .certainFailure(error: .commsError(error: error))
         }
     }
 
     public func setTime(timeZone: TimeZone, basalSchedule: BasalSchedule, date: Date, acknowledgementBeep: Bool = false) throws -> StatusResponse {
-        guard podState.pendingCommand == nil else {
+        guard podState.unacknowledgedCommand == nil else {
             throw PodCommsError.unacknowledgedCommandPending
         }
 
@@ -702,7 +709,7 @@ public class PodCommsSession {
     
     public func setBasalSchedule(schedule: BasalSchedule, scheduleOffset: TimeInterval, acknowledgementBeep: Bool = false, programReminderInterval: TimeInterval = 0) throws -> StatusResponse {
 
-        guard podState.pendingCommand == nil else {
+        guard podState.unacknowledgedCommand == nil else {
             throw PodCommsError.unacknowledgedCommandPending
         }
 
@@ -733,7 +740,7 @@ public class PodCommsSession {
     
     public func resumeBasal(schedule: BasalSchedule, scheduleOffset: TimeInterval, acknowledgementBeep: Bool = false, programReminderInterval: TimeInterval = 0) throws -> StatusResponse {
 
-        guard podState.pendingCommand == nil else {
+        guard podState.unacknowledgedCommand == nil else {
             throw PodCommsError.unacknowledgedCommandPending
         }
 
@@ -769,7 +776,7 @@ public class PodCommsSession {
     public func getStatus(beepBlock: MessageBlock? = nil) throws -> StatusResponse {
         let statusResponse: StatusResponse = try send([GetStatusCommand()], beepBlock: beepBlock)
 
-        if podState.pendingCommand != nil {
+        if podState.unacknowledgedCommand != nil {
             self.recoverUnacknowledgedCommand(using: statusResponse)
         } else {
             podState.updateFromStatusResponse(statusResponse)
@@ -803,7 +810,7 @@ public class PodCommsSession {
     // Reconnected to the pod, and we know program was successful
     private func unacknowledgedCommandWasReceived(pendingCommand: PendingCommand, podStatus: StatusResponse) {
         switch pendingCommand {
-        case .program(let program, _, let commandDate):
+        case .program(let program, _, let commandDate, _):
             if let dose = program.unfinalizedDose(at: commandDate, withCertainty: .certain, insulinType: podState.insulinType) {
                 switch dose.doseType {
                 case .bolus:
@@ -817,7 +824,7 @@ public class PodCommsSession {
                 }
                 podState.updateFromStatusResponse(podStatus)
             }
-        case .stopProgram(let stopProgram, _, let commandDate):
+        case .stopProgram(let stopProgram, _, let commandDate, _):
 
             if stopProgram.contains(.bolus), let bolus = podState.unfinalizedBolus, !bolus.isFinished(at: commandDate) {
                 podState.unfinalizedBolus?.cancel(at: commandDate, withRemaining: podStatus.bolusNotDelivered)
@@ -834,7 +841,7 @@ public class PodCommsSession {
     }
 
     public func recoverUnacknowledgedCommand(using status: StatusResponse) {
-        if let pendingCommand = podState.pendingCommand {
+        if let pendingCommand = podState.unacknowledgedCommand {
             self.log.debug("Recovering from unacknowledged command %{public}@, status = %{public}@", String(describing: pendingCommand), String(describing: status))
 
             if status.lastProgrammingMessageSeqNum == pendingCommand.sequence {
@@ -844,7 +851,7 @@ public class PodCommsSession {
                 self.log.debug("Unacknowledged command was not received by pump")
                 podState.updateFromStatusResponse(status)
             }
-            podState.pendingCommand = nil
+            podState.unacknowledgedCommand = nil
         }
     }
 
@@ -876,7 +883,7 @@ public class PodCommsSession {
             let deactivatePod = DeactivatePodCommand(nonce: podState.currentNonce)
             let status: StatusResponse = try send([deactivatePod])
 
-            if podState.pendingCommand != nil {
+            if podState.unacknowledgedCommand != nil {
                 recoverUnacknowledgedCommand(using: status)
             } else {
                 podState.updateFromStatusResponse(status)
